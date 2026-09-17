@@ -2,7 +2,7 @@ library(tidyverse)
 library(corrplot)
 
 # Import des données
-data <- read.csv("farms_train.csv", sep = ",", dec = ".")
+data <- read.csv("data/farms_train.csv", sep = ",", dec = ".")
 colnames(data)
 
 # Vérif des NA
@@ -76,7 +76,7 @@ corrplot(corr_matrix, method = "color", type = "upper",
 
 # Vérification du jeu de données test ---------------------------------------------------------------------
 
-data_test_final <- read.csv("farms_test.csv", sep = ",", dec = ".")
+data_test_final <- read.csv("data/farms_test.csv", sep = ",", dec = ".")
 data_test_final$TOF <- factor(data_test_final$TOF)
 
 str(data_test_final)
