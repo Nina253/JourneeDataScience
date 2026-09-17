@@ -22,22 +22,28 @@ matrice_penalites <- matrix(c(0, 4,
                               1, 0), 
                             byrow = TRUE, nrow = 2)
 
-# Entraînement de l'arbre avec la matrice de coûts
-mon_arbre_prudent <- rpart(DIFF ~ TOF + AGE + R7 + R8 + R17 + R22 + R32, 
+mon_arbre <- rpart(DIFF ~ TOF + AGE + R7 + R8 + R17 + R22 + R32, 
                            data = train, 
                            method = "class",
                            parms = list(loss = matrice_penalites)) # Ajout ici
 
-# Visualiser l'arbre (Tu verras qu'il favorise beaucoup plus les cases bleues "0")
-rpart.plot(mon_arbre_prudent)
+rpart.plot(mon_arbre)
 
 # Prédiction et AUC sur l'apprentissage
-pred_prob_train <- predict(mon_arbre_prudent, newdata = train, type = "prob")[, 2]
+pred_prob_train <- predict(mon_arbre, newdata = train, type = "prob")[, 2]
 roc_obj <- roc(train$DIFF, pred_prob_train)
 print(auc(roc_obj))
 
-# Prédiction sur le fichier test de Kaggle
-test_pred_prob <- predict(mon_arbre_prudent, newdata = test, type = "prob")[, 2]
+# Courbe ROC
+plot(roc_obj, 
+     main = "Courbe ROC - Arbre de Décision", 
+     col = "blue",      
+     lwd = 2,          
+     print.auc = TRUE,  
+     legacy.axes = TRUE 
+)
+
+test_pred_prob <- predict(mon_arbre, newdata = test, type = "prob")[, 2]
 
 # Changement du seuil de décision
 # On exige que le modèle soit sûr à 70% (> 0.70) pour classer une ferme comme 'Saine' (1).
@@ -46,6 +52,5 @@ test_pred_class <- ifelse(test_pred_prob > 0.70, 1, 0)
 
 # Créer le data.frame de soumission
 soumission <- data.frame(ID = 1:nrow(test), DIFF = test_pred_class)
-
-# Sauvegarder au format CSV
 write.csv(soumission, "soumission_arbre_prudent.csv", row.names = FALSE)
+
