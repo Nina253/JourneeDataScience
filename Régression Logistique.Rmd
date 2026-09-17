@@ -1,0 +1,272 @@
+---
+title: "Prédiction de la santé des exploitations agricoles - Régression Logistique"
+author: "MJEKU Olti/ Équipe 5"
+date: "2026"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+# Chargement des librairies
+```{r}
+library(dplyr)
+library(ggplot2)
+library(ROCR)
+```
+# Chargement des données d'apprentissage
+```{r}
+farms_train <- read.table("farms_train.csv", sep=",", dec=".", header=TRUE)
+```
+
+# Vérification des dimensions et aperçu des données
+```{r}
+dim(farms_train)
+head(farms_train)
+glimpse(farms_train)
+```
+# Transformation des variables qualitatives en facteurs à l'aide de dplyr
+```{r}
+farms_train <- mutate(farms_train, TOF = as.factor(TOF))
+farms_train <- mutate(farms_train, DIFF = as.factor(DIFF))
+```
+
+# Vérification de la structure après transformation
+```{r}
+glimpse(farms_train)
+```
+## 2. Exploration des données et Visualisation
+
+### Variables quantitatives
+
+Conformément à la méthode employée pour les données "prostate", nous utilisons des boxplots pour observer si les distributions des variables financières diffèrent selon que l'exploitation est saine (1) ou défaillante (0).
+
+```{r visu_quantitatives}
+# Lien entre DIFF et AGE
+ggplot(farms_train, aes(DIFF, AGE)) +
+  geom_boxplot(aes(fill = DIFF)) +
+  labs(title = "Distribution de l'Âge selon l'état de l'exploitation", x = "DIFF", y = "Âge")
+```
+```{r visu_quantitatives}
+# Lien entre DIFF et R7
+ggplot(farms_train, aes(DIFF, R7)) +
+  geom_boxplot(aes(fill = DIFF)) +
+  labs(title = "Distribution de R7 selon l'état de l'exploitation", x = "DIFF", y = "R7")
+```
+```{r visu_quantitatives}
+# Lien entre DIFF et R8
+ggplot(farms_train, aes(DIFF, R8)) +
+  geom_boxplot(aes(fill = DIFF)) +
+  labs(title = "Distribution de R8 selon l'état de l'exploitation", x = "DIFF", y = "R8")
+```
+
+### Bilan de l'exploration visuelle
+
+En résumé, l'analyse graphique montre que l'âge de l'exploitant (`AGE`) et la dette à court terme (`R8`) n'ont pas de pouvoir prédictif évident, leurs distributions étant très similaires entre les deux groupes. À l'inverse, la dette à long et moyen terme (`R7`) se détache comme un marqueur fort de risque : des niveaux élevés de cette variable sont nettement associés aux exploitations défaillantes.
+
+### Analyse des distributions et transformations
+
+Certaines variables financières présentent souvent des distributions asymétriques. Nous vérifions la distribution de la variable `R7` à l'aide d'un histogramme pour voir si une transformation logarithmique est nécessaire.
+
+```{r distribution_histogramme, message=FALSE}
+# Visualisation de la distribution classique de R7
+ggplot(farms_train, aes(x = R7)) + 
+  geom_histogram(fill = "steelblue", color = "white") +
+  labs(title = "Distribution de R7 (brute)")
+```
+### Choix de transformation : La variable R7
+
+L'analyse de l'histogramme de la variable `R7` brute révèle une distribution fortement asymétrique étalée vers la droite, avec une longue traîne de valeurs extrêmes. Face à une telle loi dissymétrique, il est préférable de transformer la variable par un passage au logarithme. L'utilisation de `log(R7)` dans le modèle permettra de stabiliser la variance et de limiter l'impact disproportionné des valeurs aberrantes sur la régression logistique.
+
+## 3. Choix des méthodes : Modèle de régression logistique
+
+Nous cherchons à prédire la variable binaire `DIFF` (saine ou défaillante). Nous apprenons un modèle de régression logistique avec la fonction `glm()` en utilisant l'ensemble des variables disponibles. Suite à notre exploration visuelle, nous appliquons une transformation logarithmique sur `R7`[cite: 2].
+
+```{r apprentissage_modele}
+# Apprentissage du modèle logistique
+modele_logistique <- glm(DIFF ~ TOF + AGE + log(R7) + R8 + R17 + R22 + R32, 
+                         family = "binomial", 
+                         data = farms_train)
+# Analyse des résultats et tests de Wald univariés
+summary(modele_logistique)
+```
+### Synthèse du modèle logistique
+
+L'analyse de la fonction `summary()` fournit les p-values des tests de Wald univariés (hypothèse $H_0 : \beta_j = 0$)[cite: 2]. En fixant un seuil de significativité à 5% :
+
+*   **Variables significatives :** Les ratios `log(R7)` (p = 0.010), `R17` (p < 0.001) et `R32` (p < 0.001) sont les seuls à avoir un impact statistiquement prouvé sur la variable cible.
+*   **Variables non significatives :** On retrouve sur les p-values l'absence de lien observée lors de l'exploration visuelle pour `AGE` et `R8`[cite: 2]. Le type d'exploitation (`TOF`) et `R22` ne sont pas non plus significatifs.
+
+Pour optimiser nos futures prédictions sur le jeu de test (`farms_test.csv`), la théorie suggère d'utiliser un modèle restreint se concentrant uniquement sur les variables avérées significatives (`log(R7)`, `R17` et `R32`).
+
+## 4. Évaluation des résultats et Choix du meilleur modèle
+
+### Création de l'échantillon de validation
+
+Pour éviter le sur-apprentissage, nous séparons le jeu de données initial en un échantillon d'apprentissage (70%) et un échantillon de validation (30%).
+
+```{r split_donnees}
+# Fixer la graine aléatoire pour que le tirage soit reproductible
+set.seed(0)
+# Séparation apprentissage (70%) / validation (30%)
+n <- nrow(farms_train)
+train_idx <- sample(1:n, size = round(0.7 * n))
+```
+```{r split_donnees}
+train_data <- farms_train[train_idx, ]
+val_data  <- farms_train[-train_idx, ]
+```
+
+# Sélection de la meilleure combinaison de variables par AUC
+
+Nous testons toutes les combinaisons possibles sur l'échantillon de validation.
+
+```{r}
+# Variables candidates
+vars <- c("TOF", "AGE", "log(R7)", "R8", "R17", "R22", "R32")
+
+# Générer toutes les combinaisons possibles
+all_combinations <- unlist(
+  lapply(1:length(vars), function(k) combn(vars, k, simplify=FALSE)),
+  recursive=FALSE
+)
+
+# Fonction pour calculer l’AUC sur l'échantillon de validation
+compute_auc <- function(var_list, train_data, val_data){
+  formula <- as.formula(paste("DIFF ~", paste(var_list, collapse=" + ")))
+  fit <- glm(formula, family="binomial", data=train_data)
+  predictions <- predict(fit, newdata=val_data, type="response")
+  target <- as.numeric(as.character(val_data$DIFF))
+  pred <- prediction(predictions, target)
+  auc  <- performance(pred, "auc")@y.values[[1]]
+  return(auc)
+}
+
+# Calculer les AUC pour toutes les combinaisons
+results <- data.frame(
+  variables = sapply(all_combinations, paste, collapse=" + "),
+  AUC = sapply(all_combinations, compute_auc, train_data=train_data, val_data=val_data)
+)
+
+# Trier et afficher les 5 meilleurs modèles
+results <- results %>% arrange(desc(AUC))
+head(results, 5)
+```
+# Performances du modèle optimal sur les données de validation
+Nous évaluons concrètement ce modèle optimal.
+
+```{r}
+# Entraînement du meilleur modèle sur les 70%
+modele_optimal <- glm(DIFF ~ log(R7) + R8 + R17 + R32, 
+                      family = "binomial", data = train_data)
+
+# Prédiction sur les 30% (données non vues par le modèle)
+pred_val = predict(modele_optimal, newdata = val_data, type = "response")
+
+# Matrice de confusion avec un seuil à 0.5
+predictions_01 = ifelse(pred_val > 0.5, 1, 0)
+cat("\nMatrice de confusion sur l'échantillon de validation :\n")
+table(Prédiction = predictions_01, Réalité = val_data$DIFF)
+
+# Tracé de la courbe ROC
+pred_rocr <- prediction(pred_val, val_data$DIFF)
+perf <- performance(pred_rocr, "tpr", "fpr")
+
+plot(perf, col = "blue", lwd = 2, main = "Courbe ROC - Modèle Optimal sur Validation")
+abline(a = 0, b = 1, col = "red", lty = 2)
+
+# VRAIE valeur d'AUC
+auc <- performance(pred_rocr, "auc")@y.values[[1]]
+cat("Vraie AUC sur l'échantillon de validation :", auc, "\n")
+```
+```{r}
+# 1. Génération de la matrice de confusion
+realite <- as.numeric(as.character(val_data$DIFF))
+predictions_classes <- ifelse(pred_val > 0.5, 1, 0)
+mc <- table(Prédiction = factor(predictions_classes, levels=c(0,1)), 
+            Réalité = factor(realite, levels=c(0,1)))
+
+cat("\n--- MATRICE DE CONFUSION ---\n")
+print(mc)
+
+# 2. Extraction des valeurs (1 = Saine, 0 = Défaillante)
+TN <- mc[1, 1] # Vrai Négatif
+TP <- mc[2, 2] # Vrai Positif
+FP <- mc[2, 1] # Faux Positif
+FN <- mc[1, 2] # Faux Négatif
+
+# 3. Calcul des métriques du cours
+accuracy <- (TP + TN) / sum(mc)
+precision <- TP / (TP + FP)
+rappel <- TP / (TP + FN)      
+specificite <- TN / (TN + FP) 
+f1_score <- 2 * (precision * rappel) / (precision + rappel)
+
+# Calcul de l'AUC (en utilisant ROCR)
+pred_rocr <- prediction(pred_val, val_data$DIFF)
+auc_val <- performance(pred_rocr, "auc")@y.values[[1]]
+
+# 4. Affichage du bilan
+cat("\n--- METRIQUES DE PERFORMANCE (Échantillon Validation) ---\n")
+cat("AUC (Aire sous la courbe ROC):", round(auc_val, 3), "\n")
+cat("Accuracy (Précision globale) :", round(accuracy, 3), "\n")
+cat("Précision                    :", round(precision, 3), "\n")
+cat("Rappel (Sensibilité)         :", round(rappel, 3), "\n")
+cat("Spécificité                  :", round(specificite, 3), "\n")
+cat("Score F1                     :", round(f1_score, 3), "\n")
+```
+```{r}
+# 1. Prédictions et matrice sur le jeu d'apprentissage (Train)
+pred_train <- predict(modele_optimal, newdata = train_data, type = "response")
+predictions_classes_train <- ifelse(pred_train > 0.5, 1, 0)
+mc_train <- table(Prédiction = factor(predictions_classes_train, levels=c(0,1)), 
+                  Réalité = factor(train_data$DIFF, levels=c(0,1)))
+
+# 2. Calcul des métriques Train
+accuracy_train <- (mc_train[2,2] + mc_train[1,1]) / sum(mc_train)
+pred_rocr_train <- prediction(pred_train, train_data$DIFF)
+auc_train <- performance(pred_rocr_train, "auc")@y.values[[1]]
+
+# 3. Affichage comparatif
+cat("\n--- VERIFICATION DU SUR-APPRENTISSAGE ---\n")
+cat("AUC      -> Apprentissage :", round(auc_train, 3), " | Validation :", round(auc_val, 3), "\n")
+cat("Accuracy -> Apprentissage :", round(accuracy_train, 3), " | Validation :", round(accuracy, 3), "\n")
+```
+
+
+# 5. Prédictions sur le jeu de test (Soumission Kaggle)
+
+Nous ré-entraînons ce modèle optimal sur l'intégralité du jeu d'apprentissage (farms_train), puis nous générons les prédictions finales.
+
+```{r}
+# 1. Entraînement du modèle final sur 100% des données d'apprentissage
+modele_final <- glm(DIFF ~ log(R7) + R8 + R17 + R32, 
+                    family = "binomial", 
+                    data = farms_train)
+
+# 2. Chargement des données de test
+farms_test <- read.table("farms_test.csv", sep=",", dec=".", header=TRUE)
+
+# 3. Prédictions des probabilités sur le jeu de test
+probabilites_test <- predict(modele_final, newdata = farms_test, type = "response")
+
+# 4. Conversion en classes (0 ou 1) avec le seuil standard de 0.5
+predictions_test_classes <- ifelse(probabilites_test > 0.5, 1, 0)
+
+# 5. Création du fichier de soumission
+soumission <- data.frame(
+  Id = 1:nrow(farms_test), 
+  DIFF = predictions_test_classes
+)
+
+# 6. Tri explicite par ordre croissant de l'Id (Sécurité Kaggle)
+soumission <- soumission[order(soumission$Id), ]
+
+# 7. Exportation au format CSV
+write.csv(soumission, "soumission_equipe.csv", row.names = FALSE, quote = FALSE)
+
+# Aperçu de la soumission
+head(soumission)
+```
+
+
